@@ -30,24 +30,28 @@ const ERR_PRICE_STALE: u32 = 7005;
 
 // ---------- State layout (oracle config PDA) ----------
 // Byte 0:       paused (bool)
-// Byte 1..9:    authority (8 bytes truncated pubkey)
-// Byte 9..17:   current_price (u64 — scaled by 1e6)
-// Byte 17..25:  moving_avg (u64 — scaled by 1e6)
-// Byte 25..33:  confidence_interval (u64 — scaled by 1e6)
-// Byte 33..41:  max_deviation_bps (u64 — basis points, e.g. 500 = 5%)
-// Byte 41..49:  max_confidence (u64 — max acceptable confidence)
-// Byte 49..57:  last_update_slot (u64)
-// Byte 57..65:  stale_threshold_slots (u64)
+// Byte 1..33:   authority (full 32-byte admin pubkey)
+// Byte 33..65:  oracle_updater (full 32-byte oracle pusher pubkey)
+// Byte 65..73:  current_price (u64 — scaled by 1e6)
+// Byte 73..81:  moving_avg (u64 — scaled by 1e6)
+// Byte 81..89:  confidence_interval (u64 — scaled by 1e6)
+// Byte 89..97:  max_deviation_bps (u64 — basis points, e.g. 500 = 5%)
+// Byte 97..105: max_confidence (u64 — max acceptable confidence)
+// Byte 105..113: last_update_slot (u64)
+// Byte 113..121: stale_threshold_slots (u64)
 
 const OFFSET_PAUSED: usize = 0;
 const OFFSET_AUTHORITY: usize = 1;
-const OFFSET_CURRENT_PRICE: usize = 9;
-const OFFSET_MOVING_AVG: usize = 17;
-const OFFSET_CONFIDENCE: usize = 25;
-const OFFSET_MAX_DEVIATION: usize = 33;
-const OFFSET_MAX_CONFIDENCE: usize = 41;
-const OFFSET_LAST_UPDATE: usize = 49;
-const OFFSET_STALE_THRESHOLD: usize = 57;
+const AUTHORITY_LEN: usize = 32;
+const OFFSET_ORACLE_UPDATER: usize = OFFSET_AUTHORITY + AUTHORITY_LEN; // 33
+const ORACLE_UPDATER_LEN: usize = 32;
+const OFFSET_CURRENT_PRICE: usize = OFFSET_ORACLE_UPDATER + ORACLE_UPDATER_LEN; // 65
+const OFFSET_MOVING_AVG: usize = OFFSET_CURRENT_PRICE + 8; // 73
+const OFFSET_CONFIDENCE: usize = OFFSET_MOVING_AVG + 8; // 81
+const OFFSET_MAX_DEVIATION: usize = OFFSET_CONFIDENCE + 8; // 89
+const OFFSET_MAX_CONFIDENCE: usize = OFFSET_MAX_DEVIATION + 8; // 97
+const OFFSET_LAST_UPDATE: usize = OFFSET_MAX_CONFIDENCE + 8; // 105
+const OFFSET_STALE_THRESHOLD: usize = OFFSET_LAST_UPDATE + 8; // 113
 
 // ---------- Helpers ----------
 
@@ -64,6 +68,17 @@ fn write_u64(data: &mut [u8], offset: usize, val: u64) {
 /// Compute absolute difference between two u64 values.
 fn abs_diff(a: u64, b: u64) -> u64 {
     if a > b { a - b } else { b - a }
+}
+
+/// Constant-time comparison of 32-byte pubkeys to prevent timing attacks.
+fn verify_pubkey(account: &AccountView, data: &[u8], offset: usize) -> bool {
+    let stored = &data[offset..offset + 32];
+    let caller = account.key().as_ref();
+    let mut diff: u8 = 0;
+    for i in 0..32 {
+        diff |= stored[i] ^ caller[i];
+    }
+    diff == 0
 }
 
 entrypoint!(process_instruction);
@@ -91,10 +106,11 @@ pub fn process_instruction(
 /// Initialize the oracle guardrail config PDA.
 ///
 /// Accounts:
-///   0 — [signer, writable] authority
+///   0 — [signer, writable] authority (admin)
 ///   1 — [writable]         config PDA
 ///
 /// Data: [discriminator (1B), max_deviation_bps (8B), max_confidence (8B), stale_threshold (8B)]
+///       + oracle_updater pubkey (32B) appended after params
 fn process_initialize(
     program_id: &Address,
     accounts: &mut [AccountView],
@@ -129,11 +145,23 @@ fn process_initialize(
         150 // ~60 seconds at ~400ms/slot
     };
 
-    // Write initial state
+    // Write initial state — store FULL 32-byte admin pubkey
     data[OFFSET_PAUSED] = 0;
     let auth_key = authority.key();
-    data[OFFSET_AUTHORITY..OFFSET_AUTHORITY + 8]
-        .copy_from_slice(&auth_key.as_ref()[..8]);
+    data[OFFSET_AUTHORITY..OFFSET_AUTHORITY + AUTHORITY_LEN]
+        .copy_from_slice(auth_key.as_ref());
+
+    // Store oracle updater — either from instruction data or default to authority
+    if instruction_data.len() >= 57 {
+        // 25 (params) + 32 (pubkey)
+        data[OFFSET_ORACLE_UPDATER..OFFSET_ORACLE_UPDATER + ORACLE_UPDATER_LEN]
+            .copy_from_slice(&instruction_data[25..57]);
+    } else {
+        // Default: oracle updater = authority
+        data[OFFSET_ORACLE_UPDATER..OFFSET_ORACLE_UPDATER + ORACLE_UPDATER_LEN]
+            .copy_from_slice(auth_key.as_ref());
+    }
+
     write_u64(&mut data, OFFSET_CURRENT_PRICE, 0);
     write_u64(&mut data, OFFSET_MOVING_AVG, 0);
     write_u64(&mut data, OFFSET_CONFIDENCE, 0);
@@ -147,10 +175,10 @@ fn process_initialize(
     Ok(())
 }
 
-/// Update oracle price feed (called by oracle push / crank).
+/// Update oracle price feed (called by authorized oracle pusher).
 ///
 /// Accounts:
-///   0 — [signer] oracle updater (or any authorized pusher)
+///   0 — [signer] oracle updater (must match stored oracle_updater pubkey)
 ///   1 — [writable] config PDA
 ///
 /// Data: [discriminator (1B), price (8B), confidence (8B), current_slot (8B)]
@@ -159,11 +187,21 @@ fn process_update_price(
     accounts: &mut [AccountView],
     instruction_data: &[u8],
 ) -> ProgramResult {
-    let [_updater, config] = accounts else {
+    let [updater, config] = accounts else {
         return Err(ERR_INVALID_ACCOUNT.into());
     };
 
+    // Authorization: updater must sign and match stored oracle_updater
+    if !updater.is_signer() {
+        return Err(ERR_UNAUTHORIZED.into());
+    }
+
     let mut data = config.try_borrow_mut_data()?;
+
+    if !verify_pubkey(updater, &data, OFFSET_ORACLE_UPDATER) {
+        msg!("Error: unauthorized oracle updater");
+        return Err(ERR_UNAUTHORIZED.into());
+    }
 
     let price = if instruction_data.len() >= 9 {
         read_u64(instruction_data, 1)
@@ -183,15 +221,14 @@ fn process_update_price(
         0
     };
 
-    // Update moving average (simple EMA: 80% old + 20% new)
+    // Update moving average using 128-bit arithmetic to preserve precision
+    // EMA: new_avg = (old_avg * 4 + price) / 5
     let old_avg = read_u64(&data, OFFSET_MOVING_AVG);
     let new_avg = if old_avg == 0 {
         price // first update
     } else {
-        // EMA: new = old * 4/5 + current * 1/5
-        let four_fifths = old_avg / 5 * 4;
-        let one_fifth = price / 5;
-        four_fifths + one_fifth
+        let wide: u128 = (old_avg as u128) * 4 + (price as u128);
+        (wide / 5) as u64
     };
 
     write_u64(&mut data, OFFSET_CURRENT_PRICE, price);
@@ -256,8 +293,7 @@ fn process_transfer_hook(
 
     if moving_avg > 0 {
         let deviation = abs_diff(current_price, moving_avg);
-        // deviation_bps = (deviation / moving_avg) * 10000
-        // Using integer math: (deviation * 10000) / moving_avg
+        // deviation_bps = (deviation * 10000) / moving_avg
         let deviation_bps = (deviation * 10_000) / moving_avg;
         let max_deviation_bps = read_u64(&data, OFFSET_MAX_DEVIATION);
 
@@ -286,7 +322,7 @@ fn process_transfer_hook(
 /// Update oracle guardrail parameters.
 ///
 /// Accounts:
-///   0 — [signer] authority
+///   0 — [signer] authority (admin)
 ///   1 — [writable] config PDA
 ///
 /// Data: [discriminator (1B), max_deviation_bps (8B), max_confidence (8B), stale_threshold (8B)]
@@ -305,10 +341,8 @@ fn process_set_params(
 
     let mut data = config.try_borrow_mut_data()?;
 
-    // Verify authority
-    let stored_auth = &data[OFFSET_AUTHORITY..OFFSET_AUTHORITY + 8];
-    let caller_auth = &authority.key().as_ref()[..8];
-    if stored_auth != caller_auth {
+    // Verify admin authority — full 32-byte comparison
+    if !verify_pubkey(authority, &data, OFFSET_AUTHORITY) {
         return Err(ERR_UNAUTHORIZED.into());
     }
 
@@ -330,7 +364,7 @@ fn process_set_params(
 /// Emergency force-pause (admin override).
 ///
 /// Accounts:
-///   0 — [signer] authority
+///   0 — [signer] authority (admin)
 ///   1 — [writable] config PDA
 ///
 /// Data: [discriminator (1B), paused (1B: 0 or 1)]
@@ -349,10 +383,8 @@ fn process_force_pause(
 
     let mut data = config.try_borrow_mut_data()?;
 
-    // Verify authority
-    let stored_auth = &data[OFFSET_AUTHORITY..OFFSET_AUTHORITY + 8];
-    let caller_auth = &authority.key().as_ref()[..8];
-    if stored_auth != caller_auth {
+    // Verify admin authority — full 32-byte comparison
+    if !verify_pubkey(authority, &data, OFFSET_AUTHORITY) {
         return Err(ERR_UNAUTHORIZED.into());
     }
 

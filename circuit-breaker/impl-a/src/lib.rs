@@ -23,19 +23,18 @@ const ERR_UNAUTHORIZED: u32 = 6002;
 const ERR_INVALID_ACCOUNT: u32 = 6003;
 
 // ---------- State layout (stored in the config PDA) ----------
-// Byte 0:      paused (bool)
-// Byte 1..9:   authority (8 bytes truncated pubkey for demo)
-// Byte 9..17:  max_outflow (u64)
-// Byte 17..25: window_start (u64 — slot timestamp)
-// Byte 25..33: current_outflow (u64)
+// Byte 0:       paused (bool)
+// Byte 1..33:   authority (full 32-byte pubkey)
+// Byte 33..41:  max_outflow (u64)
+// Byte 41..49:  window_start (u64 — slot timestamp)
+// Byte 49..57:  current_outflow (u64)
 
 const OFFSET_PAUSED: usize = 0;
 const OFFSET_AUTHORITY: usize = 1;
-const OFFSET_MAX_OUTFLOW: usize = 9;
-const OFFSET_WINDOW_START: usize = 17;
-const OFFSET_CURRENT_OUTFLOW: usize = 25;
-
-const STATE_LEN: usize = 33;
+const AUTHORITY_LEN: usize = 32;
+const OFFSET_MAX_OUTFLOW: usize = OFFSET_AUTHORITY + AUTHORITY_LEN; // 33
+const OFFSET_WINDOW_START: usize = OFFSET_MAX_OUTFLOW + 8; // 41
+const OFFSET_CURRENT_OUTFLOW: usize = OFFSET_WINDOW_START + 8; // 49
 
 // ---------- Helpers ----------
 
@@ -47,6 +46,18 @@ fn read_u64(data: &[u8], offset: usize) -> u64 {
 
 fn write_u64(data: &mut [u8], offset: usize, val: u64) {
     data[offset..offset + 8].copy_from_slice(&val.to_le_bytes());
+}
+
+/// Verify that the given account's pubkey matches the stored full 32-byte authority.
+fn verify_authority(account: &AccountView, data: &[u8]) -> bool {
+    let stored_auth = &data[OFFSET_AUTHORITY..OFFSET_AUTHORITY + AUTHORITY_LEN];
+    let caller_auth = account.key().as_ref();
+    // Constant-time comparison to prevent timing attacks
+    let mut diff: u8 = 0;
+    for i in 0..AUTHORITY_LEN {
+        diff |= stored_auth[i] ^ caller_auth[i];
+    }
+    diff == 0
 }
 
 entrypoint!(process_instruction);
@@ -83,7 +94,7 @@ fn process_initialize(
     accounts: &mut [AccountView],
     instruction_data: &[u8],
 ) -> ProgramResult {
-    let [authority, config, system_program] = accounts else {
+    let [authority, config, _system_program] = accounts else {
         return Err(ERR_INVALID_ACCOUNT.into());
     };
 
@@ -92,8 +103,7 @@ fn process_initialize(
         return Err(ERR_UNAUTHORIZED.into());
     }
 
-    // Config account must be owned by the program (just allocated) or empty
-    let data = config.try_borrow_mut_data()?;
+    let mut data = config.try_borrow_mut_data()?;
 
     // Parse max_outflow from instruction data
     let max_outflow = if instruction_data.len() >= 9 {
@@ -102,11 +112,11 @@ fn process_initialize(
         1_000_000 // default 1M lamports
     };
 
-    // Write initial state
+    // Write initial state — store FULL 32-byte pubkey
     data[OFFSET_PAUSED] = 0; // not paused
     let auth_key = authority.key();
-    data[OFFSET_AUTHORITY..OFFSET_AUTHORITY + 8]
-        .copy_from_slice(&auth_key.as_ref()[..8]);
+    data[OFFSET_AUTHORITY..OFFSET_AUTHORITY + AUTHORITY_LEN]
+        .copy_from_slice(auth_key.as_ref());
     write_u64(&mut data, OFFSET_MAX_OUTFLOW, max_outflow);
     write_u64(&mut data, OFFSET_WINDOW_START, 0);
     write_u64(&mut data, OFFSET_CURRENT_OUTFLOW, 0);
@@ -136,11 +146,10 @@ fn process_set_pause(
         return Err(ERR_UNAUTHORIZED.into());
     }
 
-    // Verify authority matches stored admin
     let data = config.try_borrow_mut_data()?;
-    let stored_auth = &data[OFFSET_AUTHORITY..OFFSET_AUTHORITY + 8];
-    let caller_auth = &authority.key().as_ref()[..8];
-    if stored_auth != caller_auth {
+
+    // Verify authority — full 32-byte comparison
+    if !verify_authority(authority, &data) {
         return Err(ERR_UNAUTHORIZED.into());
     }
 
@@ -206,14 +215,15 @@ fn process_transfer(
         current_outflow = 0;
     }
 
-    // Check rate limit
-    if current_outflow + amount > max_outflow {
+    // Check rate limit — use checked arithmetic to prevent overflow
+    let new_outflow = current_outflow.checked_add(amount).ok_or(ERR_RATE_LIMIT_EXCEEDED)?;
+    if new_outflow > max_outflow {
         msg!("Error: rate limit exceeded");
         return Err(ERR_RATE_LIMIT_EXCEEDED.into());
     }
 
     // Update outflow
-    write_u64(&mut data, OFFSET_CURRENT_OUTFLOW, current_outflow + amount);
+    write_u64(&mut data, OFFSET_CURRENT_OUTFLOW, new_outflow);
 
     msg!("Transfer allowed through circuit breaker");
 
@@ -245,10 +255,8 @@ fn process_update_threshold(
 
     let mut data = config.try_borrow_mut_data()?;
 
-    // Verify authority
-    let stored_auth = &data[OFFSET_AUTHORITY..OFFSET_AUTHORITY + 8];
-    let caller_auth = &authority.key().as_ref()[..8];
-    if stored_auth != caller_auth {
+    // Verify authority — full 32-byte comparison
+    if !verify_authority(authority, &data) {
         return Err(ERR_UNAUTHORIZED.into());
     }
 
