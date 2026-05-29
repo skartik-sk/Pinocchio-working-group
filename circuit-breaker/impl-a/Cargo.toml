@@ -1,0 +1,16 @@
+[package]
+name = "circuit-breaker-impl-a"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+crate-type = ["cdylib", "lib"]
+
+[dependencies]
+pinocchio = "0.11"
+pinocchio-system = "0.2"
+pinocchio-token = "0.6"
+
+[features]
+default = []
+bpf-entrypoint = []
