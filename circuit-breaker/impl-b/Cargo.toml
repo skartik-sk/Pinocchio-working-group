@@ -1,5 +1,5 @@
 [package]
-name = "circuit-breaker-impl-b"
+name = "stable-swap-circuit-breaker"
 version = "0.1.0"
 edition = "2021"
 
@@ -10,8 +10,15 @@ crate-type = ["cdylib", "lib"]
 pinocchio = "0.11"
 pinocchio-system = "0.2"
 pinocchio-token = "0.6"
-pinocchio-token-2022 = "0.6"
+pinocchio-log = "0.5"
+solana-program = "1.18"
+
+[dev-dependencies]
+solana-program-test = "1.18"
+solana-sdk = "1.18"
+spl-token = "4.0"
 
 [features]
 default = []
 bpf-entrypoint = []
+test = []
