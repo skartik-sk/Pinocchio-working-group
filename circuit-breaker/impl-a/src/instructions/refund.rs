@@ -2,6 +2,8 @@ use pinocchio::{
     AccountView,
     Address,
     ProgramResult,
+    cpi::Signer,
+    instruction::cpi::Seed,
 };
 
 use pinocchio_token::instructions::{CloseAccount, Transfer};
@@ -16,7 +18,7 @@ pub fn process(
     accounts: &mut [AccountView],
     _ix_data: &[u8],
 ) -> ProgramResult {
-    let [maker, maker_ata_a, vault, escrow, token_program, _rest @ ..] = accounts else {
+    let [maker, maker_ata_a, vault, escrow, _token_program, _rest @ ..] = accounts else {
         return Err(pinocchio::error::ProgramError::NotEnoughAccountKeys);
     };
 
@@ -26,37 +28,35 @@ pub fn process(
 
     let escrow_data = escrow.try_borrow()?;
 
-    let stored_maker = Address::from_bytes(&escrow_data[Escrow::OFFSET_MAKER..Escrow::OFFSET_MAKER + 32]);
+    let mut arr = [0u8; 32];
+    arr.copy_from_slice(&escrow_data[Escrow::OFFSET_MAKER..Escrow::OFFSET_MAKER + 32]);
+    let stored_maker = Address::new_from_array(arr);
     let amount = read_u64_escrow(&escrow_data);
     let bump = escrow_data[Escrow::OFFSET_BUMP];
 
     drop(escrow_data);
 
-    if &stored_maker != maker.key() {
+    if maker.address() != &stored_maker {
         return Err(ERR_UNAUTHORIZED.into());
     }
 
-    let escrow_seeds = [b"escrow", maker.key().as_ref()];
+    let bump_seed = [bump];
+    let signer_seeds = [
+        Seed::from(b"escrow"),
+        Seed::from(maker.address().as_ref()),
+        Seed::from(&bump_seed[..]),
+    ];
+    let signer = Signer::from(&signer_seeds);
 
-    Transfer {
-        from: &vault,
-        to: &maker_ata_a,
-        authority: &escrow,
-        amount,
-    }
-    .invoke_signed(&[&escrow_seeds, &[&[bump]]])?;
+    Transfer::new(&*vault, &*maker_ata_a, &*escrow, amount)
+        .invoke_signed(&[signer.clone()])?;
 
-    CloseAccount {
-        account: &vault,
-        destination: &maker,
-        authority: &escrow,
-    }
-    .invoke_signed(&[&escrow_seeds, &[&[bump]]])?;
+    CloseAccount::new(&*vault, &*maker, &*escrow)
+        .invoke_signed(&[signer])?;
 
-    unsafe {
-        *maker.try_borrow_mut_lamports_unchecked()? += *escrow.try_borrow_lamports_unchecked()?;
-        *escrow.try_borrow_mut_lamports_unchecked()? = 0;
-    }
+    let escrow_lamports = escrow.lamports();
+    maker.set_lamports(maker.lamports() + escrow_lamports);
+    escrow.set_lamports(0);
 
     log("Escrow refunded");
 

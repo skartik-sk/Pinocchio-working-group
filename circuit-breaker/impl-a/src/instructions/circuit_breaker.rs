@@ -19,7 +19,7 @@ pub fn process_init(
     accounts: &mut [AccountView],
     ix_data: &[u8],
 ) -> ProgramResult {
-    let [authority, cb_pda, system_program, _rest @ ..] = accounts else {
+    let [authority, cb_pda, _system_program, _rest @ ..] = accounts else {
         return Err(pinocchio::error::ProgramError::NotEnoughAccountKeys);
     };
 
@@ -31,10 +31,12 @@ pub fn process_init(
     let threshold_type = ix_data.get(9).copied().unwrap_or(1);
     let threshold = read_u64_cb(ix_data, 10).unwrap_or(1_000_000);
 
-    let cb_seeds = [b"circuit-breaker", authority.key().as_ref()];
-    let (cb_key, bump) = Address::find_program_address(&cb_seeds, program_id);
+    let (cb_key, bump) = Address::find_program_address(
+        &[b"circuit-breaker", authority.address().as_ref()],
+        program_id,
+    );
 
-    if cb_pda.key() != &cb_key {
+    if cb_pda.address() != &cb_key {
         return Err(ERR_INVALID_ACCOUNT.into());
     }
 
@@ -42,8 +44,8 @@ pub fn process_init(
     let lamports = 1_000_000;
 
     CreateAccount {
-        from: &authority,
-        to: &cb_pda,
+        from: &*authority,
+        to: &*cb_pda,
         lamports,
         space,
         owner: program_id,
@@ -53,7 +55,7 @@ pub fn process_init(
     let mut cb_data = cb_pda.try_borrow_mut()?;
 
     cb_data[CircuitBreaker::OFFSET_AUTHORITY..CircuitBreaker::OFFSET_AUTHORITY + 32]
-        .copy_from_slice(authority.key().as_ref());
+        .copy_from_slice(authority.address().as_ref());
     cb_data[CircuitBreaker::OFFSET_PAUSED] = 0;
     write_u64_cb(&mut cb_data, CircuitBreaker::OFFSET_WINDOW_SEC, window_sec);
     cb_data[CircuitBreaker::OFFSET_THRESHOLD_TYPE] = threshold_type;
@@ -85,6 +87,8 @@ pub fn process_update(
     if !verify_auth(&authority, &cb_data) {
         return Err(ERR_UNAUTHORIZED.into());
     }
+
+    drop(cb_data);
 
     let mut cb_data = cb_pda.try_borrow_mut()?;
 
@@ -122,6 +126,8 @@ pub fn process_pause(
         return Err(ERR_UNAUTHORIZED.into());
     }
 
+    drop(cb_data);
+
     let mut cb_data = cb_pda.try_borrow_mut()?;
 
     let paused = ix_data.get(1).copied().unwrap_or(1);
@@ -132,49 +138,9 @@ pub fn process_pause(
     Ok(())
 }
 
-pub fn check_and_update_window(
-    data: &mut [u8],
-    amount: u64,
-    current_ts: i64,
-    account_balance: u64,
-) -> Result<bool, ProgramResult> {
-    let window_sec = read_u64_data(data, CircuitBreaker::OFFSET_WINDOW_SEC);
-    let threshold_type = data[CircuitBreaker::OFFSET_THRESHOLD_TYPE];
-    let threshold = read_u64_data(data, CircuitBreaker::OFFSET_THRESHOLD);
-    let last_value = read_u64_data(data, CircuitBreaker::OFFSET_LAST_VALUE);
-    let last_ts = read_i64_data(data, CircuitBreaker::OFFSET_LAST_TS);
-
-    let window_elapsed = current_ts.saturating_sub(last_ts);
-    let decayed = if window_elapsed as u64 >= window_sec {
-        0
-    } else {
-        (last_value as u128)
-            .saturating_mul((window_sec - window_elapsed as u64) as u128)
-            .saturating_div(window_sec as u128) as u64
-    };
-
-    let new_aggregated = decayed.saturating_add(amount);
-
-    let limit = if threshold_type == 0 {
-        (account_balance as u128)
-            .saturating_mul(threshold as u128)
-            .saturating_div(u64::MAX as u128) as u64
-    } else {
-        threshold
-    };
-
-    if new_aggregated <= limit {
-        write_u64_cb(data, CircuitBreaker::OFFSET_LAST_VALUE, new_aggregated);
-        write_i64_cb(data, CircuitBreaker::OFFSET_LAST_TS, current_ts);
-        Ok(true)
-    } else {
-        Ok(false)
-    }
-}
-
 fn verify_auth(account: &AccountView, data: &[u8]) -> bool {
     let stored = &data[CircuitBreaker::OFFSET_AUTHORITY..CircuitBreaker::OFFSET_AUTHORITY + 32];
-    let caller = account.key().as_ref();
+    let caller = account.address().as_ref();
     let mut diff: u8 = 0;
     for i in 0..32 {
         diff |= stored[i] ^ caller[i];
@@ -182,25 +148,13 @@ fn verify_auth(account: &AccountView, data: &[u8]) -> bool {
     diff == 0
 }
 
-fn read_u64_cb(data: &[u8], offset: usize) -> Result<u64, ProgramResult> {
+fn read_u64_cb(data: &[u8], offset: usize) -> Result<u64, pinocchio::error::ProgramError> {
     if data.len() < offset + 8 {
         return Err(pinocchio::error::ProgramError::InvalidInstructionData);
     }
     let mut buf = [0u8; 8];
     buf.copy_from_slice(&data[offset..offset + 8]);
     Ok(u64::from_le_bytes(buf))
-}
-
-fn read_u64_data(data: &[u8], offset: usize) -> u64 {
-    let mut buf = [0u8; 8];
-    buf.copy_from_slice(&data[offset..offset + 8]);
-    u64::from_le_bytes(buf)
-}
-
-fn read_i64_data(data: &[u8], offset: usize) -> i64 {
-    let mut buf = [0u8; 8];
-    buf.copy_from_slice(&data[offset..offset + 8]);
-    i64::from_le_bytes(buf)
 }
 
 fn write_u64_cb(data: &mut [u8], offset: usize, val: u64) {

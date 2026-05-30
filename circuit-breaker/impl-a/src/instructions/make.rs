@@ -2,6 +2,8 @@ use pinocchio::{
     AccountView,
     Address,
     ProgramResult,
+    cpi::Signer,
+    instruction::cpi::Seed,
 };
 use pinocchio_system::instructions::CreateAccount;
 use pinocchio_token::instructions::Transfer;
@@ -18,7 +20,7 @@ pub fn process(
     accounts: &mut [AccountView],
     ix_data: &[u8],
 ) -> ProgramResult {
-    let [maker, mint_a, mint_b, maker_ata_a, vault, escrow, cb_pda, system_program, token_program, _rest @ ..] =
+    let [maker, mint_a, mint_b, maker_ata_a, vault, escrow, cb_pda, _system_program, _token_program, _rest @ ..] =
         accounts
     else {
             return Err(pinocchio::error::ProgramError::NotEnoughAccountKeys);
@@ -31,34 +33,45 @@ pub fn process(
     let amount = read_u64(ix_data, 1)?;
     let expiry = read_i64(ix_data, 9).unwrap_or(i64::MAX);
 
-    let escrow_seeds = [b"escrow", maker.key().as_ref()];
-    let (escrow_key, bump) = Address::find_program_address(&escrow_seeds, program_id);
+    let _escrow_seeds = [
+        Seed::from(b"escrow"),
+        Seed::from(maker.address().as_ref()),
+    ];
+    let (escrow_key, bump) = Address::find_program_address(
+        &[b"escrow", maker.address().as_ref()],
+        program_id,
+    );
 
-    if escrow.key() != &escrow_key {
+    if escrow.address() != &escrow_key {
         return Err(ERR_INVALID_ACCOUNT.into());
     }
 
-    let cb_seeds = [b"circuit-breaker", maker.key().as_ref()];
-    let (cb_key, _cb_bump) = Address::find_program_address(&cb_seeds, program_id);
+    let (cb_key, _cb_bump) = Address::find_program_address(
+        &[b"circuit-breaker", maker.address().as_ref()],
+        program_id,
+    );
 
-    if cb_pda.key() != &cb_key {
+    if cb_pda.address() != &cb_key {
         return Err(ERR_INVALID_ACCOUNT.into());
     }
 
-    let mut cb_data = cb_pda.try_borrow_mut()?;
+    let cb_data_len = cb_pda.data_len();
+    let cb_data = cb_pda.try_borrow_mut()?;
 
-    if cb_pda.data_len() >= crate::state::CircuitBreaker::LEN {
+    if cb_data_len >= crate::state::CircuitBreaker::LEN {
         if cb_data[crate::state::CircuitBreaker::OFFSET_PAUSED] != 0 {
             return Err(ERR_PAUSED.into());
         }
     }
 
+    drop(cb_data);
+
     let space = Escrow::LEN as u64;
     let lamports = 1_000_000;
 
     CreateAccount {
-        from: &maker,
-        to: &escrow,
+        from: &*maker,
+        to: &*escrow,
         lamports,
         space,
         owner: program_id,
@@ -68,24 +81,27 @@ pub fn process(
     let mut escrow_data = escrow.try_borrow_mut()?;
 
     escrow_data[Escrow::OFFSET_MAKER..Escrow::OFFSET_MAKER + 32]
-        .copy_from_slice(maker.key().as_ref());
+        .copy_from_slice(maker.address().as_ref());
     escrow_data[Escrow::OFFSET_MINT_A..Escrow::OFFSET_MINT_A + 32]
-        .copy_from_slice(mint_a.key().as_ref());
+        .copy_from_slice(mint_a.address().as_ref());
     escrow_data[Escrow::OFFSET_MINT_B..Escrow::OFFSET_MINT_B + 32]
-        .copy_from_slice(mint_b.key().as_ref());
+        .copy_from_slice(mint_b.address().as_ref());
     write_u64(&mut escrow_data, Escrow::OFFSET_AMOUNT, amount);
     write_i64(&mut escrow_data, Escrow::OFFSET_EXPIRY, expiry);
     escrow_data[Escrow::OFFSET_BUMP] = bump;
 
     drop(escrow_data);
 
-    Transfer {
-        from: &maker_ata_a,
-        to: &vault,
-        authority: &maker,
-        amount,
-    }
-    .invoke_signed(&[&escrow_seeds, &[&[bump]]])?;
+    let bump_seed = [bump];
+    let signer_seeds = [
+        Seed::from(b"escrow"),
+        Seed::from(maker.address().as_ref()),
+        Seed::from(&bump_seed[..]),
+    ];
+    let signer = Signer::from(&signer_seeds);
+
+    Transfer::new(&*maker_ata_a, &*vault, &*maker, amount)
+        .invoke_signed(&[signer])?;
 
     log("Escrow created");
 

@@ -8,7 +8,7 @@ crate-type = ["cdylib", "lib"]
 
 [dependencies]
 pinocchio = { version = "0.11", features = ["cpi"] }
-pinocchio-system = "0.2"
+pinocchio-system = "0.6"
 pinocchio-token = "0.6"
 pinocchio-log = "0.5"
 solana-program = "1.18"

@@ -2,6 +2,8 @@ use pinocchio::{
     AccountView,
     Address,
     ProgramResult,
+    cpi::Signer,
+    instruction::cpi::Seed,
 };
 
 use pinocchio_token::instructions::{CloseAccount, Transfer};
@@ -14,11 +16,11 @@ use crate::{
 pub const DISC: u8 = 1;
 
 pub fn process(
-    program_id: &Address,
+    _program_id: &Address,
     accounts: &mut [AccountView],
-    ix_data: &[u8],
+    _ix_data: &[u8],
 ) -> ProgramResult {
-    let [taker, maker, mint_a, mint_b, maker_ata_a, taker_ata_a, taker_ata_b, vault, escrow, cb_pda, token_program, _rest @ ..] =
+    let [taker, maker, mint_a, mint_b, maker_ata_a, taker_ata_a, taker_ata_b, vault, escrow, cb_pda, _token_program, _rest @ ..] =
         accounts
     else {
             return Err(pinocchio::error::ProgramError::NotEnoughAccountKeys);
@@ -30,35 +32,40 @@ pub fn process(
 
     let escrow_data = escrow.try_borrow()?;
 
-    let stored_maker = Address::from_bytes(&escrow_data[Escrow::OFFSET_MAKER..Escrow::OFFSET_MAKER + 32]);
-    let stored_mint_a = Address::from_bytes(&escrow_data[Escrow::OFFSET_MINT_A..Escrow::OFFSET_MINT_A + 32]);
-    let stored_mint_b = Address::from_bytes(&escrow_data[Escrow::OFFSET_MINT_B..Escrow::OFFSET_MINT_B + 32]);
+    let mut arr = [0u8; 32];
+    arr.copy_from_slice(&escrow_data[Escrow::OFFSET_MAKER..Escrow::OFFSET_MAKER + 32]);
+    let stored_maker = Address::new_from_array(arr);
+    arr.copy_from_slice(&escrow_data[Escrow::OFFSET_MINT_A..Escrow::OFFSET_MINT_A + 32]);
+    let stored_mint_a = Address::new_from_array(arr);
+    arr.copy_from_slice(&escrow_data[Escrow::OFFSET_MINT_B..Escrow::OFFSET_MINT_B + 32]);
+    let stored_mint_b = Address::new_from_array(arr);
     let amount = read_u64_escrow(&escrow_data);
     let expiry = read_i64_escrow(&escrow_data);
 
     drop(escrow_data);
 
-    if &stored_maker != maker.key() {
+    if maker.address() != &stored_maker {
         return Err(ERR_INVALID_ACCOUNT.into());
     }
 
-    if mint_a.key() != &stored_mint_a {
+    if mint_a.address() != &stored_mint_a {
         return Err(ERR_INVALID_ACCOUNT.into());
     }
 
-    if mint_b.key() != &stored_mint_b {
+    if mint_b.address() != &stored_mint_b {
         return Err(ERR_INVALID_ACCOUNT.into());
     }
 
-    let current_ts = 0;
+    let current_ts = 0i64;
 
     if expiry < current_ts {
         return Err(ERR_EXPIRED.into());
     }
 
+    let cb_data_len = cb_pda.data_len();
     let mut cb_data = cb_pda.try_borrow_mut()?;
 
-    if cb_pda.data_len() >= CircuitBreaker::LEN {
+    if cb_data_len >= CircuitBreaker::LEN {
         if cb_data[CircuitBreaker::OFFSET_PAUSED] != 0 {
             return Err(ERR_PAUSED.into());
         }
@@ -68,37 +75,32 @@ pub fn process(
         }
     }
 
-    let bump = escrow.try_borrow()?[Escrow::OFFSET_BUMP];
+    drop(cb_data);
 
-    let escrow_seeds = [b"escrow", maker.key().as_ref()];
+    let escrow_data = escrow.try_borrow()?;
+    let bump = escrow_data[Escrow::OFFSET_BUMP];
+    drop(escrow_data);
 
-    Transfer {
-        from: &vault,
-        to: &taker_ata_a,
-        authority: &escrow,
-        amount,
-    }
-    .invoke_signed(&[&escrow_seeds, &[&[bump]]])?;
+    let bump_seed = [bump];
+    let signer_seeds = [
+        Seed::from(b"escrow"),
+        Seed::from(maker.address().as_ref()),
+        Seed::from(&bump_seed[..]),
+    ];
+    let signer = Signer::from(&signer_seeds);
 
-    Transfer {
-        from: &taker_ata_b,
-        to: &maker_ata_a,
-        authority: &taker,
-        amount,
-    }
-    .invoke()?;
+    Transfer::new(&*vault, &*taker_ata_a, &*escrow, amount)
+        .invoke_signed(&[signer.clone()])?;
 
-    CloseAccount {
-        account: &vault,
-        destination: &maker,
-        authority: &escrow,
-    }
-    .invoke_signed(&[&escrow_seeds, &[&[bump]]])?;
+    Transfer::new(&*taker_ata_b, &*maker_ata_a, &*taker, amount)
+        .invoke()?;
 
-    unsafe {
-        *maker.try_borrow_mut_lamports_unchecked()? += *escrow.try_borrow_lamports_unchecked()?;
-        *escrow.try_borrow_mut_lamports_unchecked()? = 0;
-    }
+    CloseAccount::new(&*vault, &*maker, &*escrow)
+        .invoke_signed(&[signer])?;
+
+    let escrow_lamports = escrow.lamports();
+    maker.set_lamports(maker.lamports() + escrow_lamports);
+    escrow.set_lamports(0);
 
     log("Escrow taken");
 
@@ -122,7 +124,7 @@ fn check_and_update_window(
     amount: u64,
     current_ts: i64,
     account_balance: u64,
-) -> Result<bool, ProgramResult> {
+) -> Result<bool, pinocchio::error::ProgramError> {
     let window_sec = read_u64_data(data, CircuitBreaker::OFFSET_WINDOW_SEC);
     let threshold_type = data[CircuitBreaker::OFFSET_THRESHOLD_TYPE];
     let threshold = read_u64_data(data, CircuitBreaker::OFFSET_THRESHOLD);

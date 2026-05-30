@@ -11,12 +11,8 @@ use pinocchio::{
 
 nostd_panic_handler!();
 
-use solana_program_log::log;
-
 pub mod state;
 pub mod instructions;
-
-use instructions::*;
 
 entrypoint!(process_instruction);
 

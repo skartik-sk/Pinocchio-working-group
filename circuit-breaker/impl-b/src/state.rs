@@ -1,13 +1,13 @@
-use pinocchio::pubkey::Pubkey;
+use pinocchio::Address;
 
 #[repr(C)]
 pub struct PoolState {
-    pub authority: Pubkey,
-    pub mint_a: Pubkey,
-    pub mint_b: Pubkey,
-    pub reserve_a: Pubkey,
-    pub reserve_b: Pubkey,
-    pub lp_mint: Pubkey,
+    pub authority: Address,
+    pub mint_a: Address,
+    pub mint_b: Address,
+    pub reserve_a: Address,
+    pub reserve_b: Address,
+    pub lp_mint: Address,
     pub amp_factor: u64,
     pub trade_fee_bps: u16,
     pub admin_fee_bps: u16,
@@ -37,10 +37,6 @@ impl PoolState {
     pub const OFFSET_CB_LAST_VAL: usize = 221;
     pub const OFFSET_CB_LAST_TS: usize = 229;
     pub const OFFSET_BUMP: usize = 237;
-
-    pub fn is_paused(&self) -> bool {
-        self.paused != 0
-    }
 }
 
 pub const ERR_PAUSED: u64 = 7000;

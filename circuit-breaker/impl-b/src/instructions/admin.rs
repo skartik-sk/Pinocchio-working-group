@@ -1,67 +1,73 @@
 use pinocchio::{
-    account_info::AccountInfo,
-    pubkey::Pubkey,
-    AccountInfo as AccountInfoRef,
+    AccountView,
+    Address,
     ProgramResult,
+    cpi::Signer,
+    instruction::cpi::Seed,
 };
 
 use pinocchio_token::instructions::Transfer;
+use solana_program_log::log;
 
-use crate::state::{PoolState, ERR_UNAUTHORIZED, ERR_INVALID_ACCOUNT};
+use crate::state::{PoolState, ERR_UNAUTHORIZED};
 
 pub const PAUSE_DISC: u8 = 3;
 pub const UPDATE_CB_DISC: u8 = 4;
 pub const EMERGENCY_DISC: u8 = 5;
 
 pub fn process_pause(
-    _program_id: &Pubkey,
-    accounts: &mut [AccountInfoRef],
+    _program_id: &Address,
+    accounts: &mut [AccountView],
     ix_data: &[u8],
 ) -> ProgramResult {
     let [authority, pool_state, _rest @ ..] = accounts else {
-        return Err(pinocchio::ProgramError::NotEnoughAccountKeys);
+        return Err(pinocchio::error::ProgramError::NotEnoughAccountKeys);
     };
 
     if !authority.is_signer() {
-        return Err(pinocchio::ProgramError::MissingRequiredSignature);
+        return Err(pinocchio::error::ProgramError::MissingRequiredSignature);
     }
 
-    let pool_data = pool_state.try_borrow_data()?;
+    let pool_data = pool_state.try_borrow()?;
 
-    if !verify_auth(authority, &pool_data) {
+    if !verify_auth(&authority, &pool_data) {
         return Err(ERR_UNAUTHORIZED.into());
     }
 
-    let mut pool_data = pool_state.try_borrow_mut_data()?;
+    drop(pool_data);
+
+    let mut pool_data = pool_state.try_borrow_mut()?;
 
     let paused = ix_data.get(1).copied().unwrap_or(1);
     pool_data[PoolState::OFFSET_PAUSED] = paused;
 
-    pinocchio::msg!("Paused: {}", paused);
+    log("Paused");
 
     Ok(())
 }
 
 pub fn process_update_cb(
-    _program_id: &Pubkey,
-    accounts: &mut [AccountInfoRef],
+    _program_id: &Address,
+    accounts: &mut [AccountView],
     ix_data: &[u8],
 ) -> ProgramResult {
     let [authority, pool_state, _rest @ ..] = accounts else {
-        return Err(pinocchio::ProgramError::NotEnoughAccountKeys);
+        return Err(pinocchio::error::ProgramError::NotEnoughAccountKeys);
     };
 
     if !authority.is_signer() {
-        return Err(pinocchio::ProgramError::MissingRequiredSignature);
+        return Err(pinocchio::error::ProgramError::MissingRequiredSignature);
     }
 
-    let pool_data = pool_state.try_borrow_data()?;
+    let pool_data = pool_state.try_borrow()?;
 
-    if !verify_auth(authority, &pool_data) {
+    if !verify_auth(&authority, &pool_data) {
         return Err(ERR_UNAUTHORIZED.into());
     }
 
-    let mut pool_data = pool_state.try_borrow_mut_data()?;
+    drop(pool_data);
+
+    let mut pool_data = pool_state.try_borrow_mut()?;
 
     if ix_data.len() >= 9 {
         write_u64(&mut pool_data, PoolState::OFFSET_CB_WINDOW, read_u64(ix_data, 1)?);
@@ -70,73 +76,76 @@ pub fn process_update_cb(
         write_u64(&mut pool_data, PoolState::OFFSET_CB_THRESH, read_u64(ix_data, 9)?);
     }
 
-    pinocchio::msg!("CB updated");
+    log("CB updated");
 
     Ok(())
 }
 
 pub fn process_emergency(
-    program_id: &Pubkey,
-    accounts: &mut [AccountInfoRef],
+    _program_id: &Address,
+    accounts: &mut [AccountView],
     _ix_data: &[u8],
 ) -> ProgramResult {
-    let [authority, pool_state, reserve_a, reserve_b, dest_a, dest_b, token_program, _rest @ ..] =
+    let [authority, pool_state, reserve_a, reserve_b, dest_a, dest_b, _token_program, _rest @ ..] =
         accounts
     else {
-        return Err(pinocchio::ProgramError::NotEnoughAccountKeys);
+        return Err(pinocchio::error::ProgramError::NotEnoughAccountKeys);
     };
 
     if !authority.is_signer() {
-        return Err(pinocchio::ProgramError::MissingRequiredSignature);
+        return Err(pinocchio::error::ProgramError::MissingRequiredSignature);
     }
 
-    let pool_data = pool_state.try_borrow_data()?;
+    let pool_data = pool_state.try_borrow()?;
 
-    if !verify_auth(authority, &pool_data) {
+    if !verify_auth(&authority, &pool_data) {
         return Err(ERR_UNAUTHORIZED.into());
     }
 
-    let reserve_a_data = reserve_a.try_borrow_data()?;
-    let reserve_b_data = reserve_b.try_borrow_data()?;
+    let reserve_a_data = reserve_a.try_borrow()?;
+    let reserve_b_data = reserve_b.try_borrow()?;
 
     let amount_a = read_u64_tok(&reserve_a_data);
     let amount_b = read_u64_tok(&reserve_b_data);
 
-    let pool_seeds = [
-        b"stable-swap-pool",
-        &pool_data[PoolState::OFFSET_MINT_A..PoolState::OFFSET_MINT_A + 32],
-        &pool_data[PoolState::OFFSET_MINT_B..PoolState::OFFSET_MINT_B + 32],
-        &[pool_data[PoolState::OFFSET_BUMP]],
+    drop(reserve_a_data);
+    drop(reserve_b_data);
+
+    let bump = pool_data[PoolState::OFFSET_BUMP];
+    let mut mint_a_arr = [0u8; 32];
+    mint_a_arr.copy_from_slice(&pool_data[PoolState::OFFSET_MINT_A..PoolState::OFFSET_MINT_A + 32]);
+    let mut mint_b_arr = [0u8; 32];
+    mint_b_arr.copy_from_slice(&pool_data[PoolState::OFFSET_MINT_B..PoolState::OFFSET_MINT_B + 32]);
+
+    drop(pool_data);
+
+    let bump_seed = [bump];
+    let signer_seeds = [
+        Seed::from(b"stable-swap-pool"),
+        Seed::from(&mint_a_arr[..]),
+        Seed::from(&mint_b_arr[..]),
+        Seed::from(&bump_seed[..]),
     ];
+    let signer = Signer::from(&signer_seeds);
 
     if amount_a > 0 {
-        Transfer {
-            from: reserve_a,
-            to: dest_a,
-            authority: pool_state,
-            amount: amount_a,
-        }
-        .invoke_signed(&[&pool_seeds])?;
+        Transfer::new(&*reserve_a, &*dest_a, &*pool_state, amount_a)
+            .invoke_signed(&[signer.clone()])?;
     }
 
     if amount_b > 0 {
-        Transfer {
-            from: reserve_b,
-            to: dest_b,
-            authority: pool_state,
-            amount: amount_b,
-        }
-        .invoke_signed(&[&pool_seeds])?;
+        Transfer::new(&*reserve_b, &*dest_b, &*pool_state, amount_b)
+            .invoke_signed(&[signer])?;
     }
 
-    pinocchio::msg!("Emergency withdraw");
+    log("Emergency withdraw");
 
     Ok(())
 }
 
-fn verify_auth(account: &AccountInfoRef, data: &[u8]) -> bool {
+fn verify_auth(account: &AccountView, data: &[u8]) -> bool {
     let stored = &data[PoolState::OFFSET_AUTHORITY..PoolState::OFFSET_AUTHORITY + 32];
-    let caller = account.key().as_ref();
+    let caller = account.address().as_ref();
     let mut diff: u8 = 0;
     for i in 0..32 {
         diff |= stored[i] ^ caller[i];
@@ -144,9 +153,9 @@ fn verify_auth(account: &AccountInfoRef, data: &[u8]) -> bool {
     diff == 0
 }
 
-fn read_u64(data: &[u8], offset: usize) -> Result<u64, pinocchio::ProgramError> {
+fn read_u64(data: &[u8], offset: usize) -> Result<u64, pinocchio::error::ProgramError> {
     if data.len() < offset + 8 {
-        return Err(pinocchio::ProgramError::InvalidInstruction);
+        return Err(pinocchio::error::ProgramError::InvalidInstructionData);
     }
     let mut buf = [0u8; 8];
     buf.copy_from_slice(&data[offset..offset + 8]);
