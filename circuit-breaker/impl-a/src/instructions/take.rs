@@ -4,6 +4,8 @@ use pinocchio::{
     ProgramResult,
     cpi::Signer,
     instruction::cpi::Seed,
+    sysvars::clock::Clock,
+    sysvars::Sysvar,
 };
 
 use pinocchio_token::instructions::{CloseAccount, Transfer};
@@ -56,7 +58,7 @@ pub fn process(
         return Err(ERR_INVALID_ACCOUNT.into());
     }
 
-    let current_ts = 0i64;
+    let current_ts = Clock::get()?.unix_timestamp;
 
     if expiry < current_ts {
         return Err(ERR_EXPIRED.into());

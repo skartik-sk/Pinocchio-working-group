@@ -4,6 +4,8 @@ use pinocchio::{
     ProgramResult,
     cpi::Signer,
     instruction::cpi::Seed,
+    sysvars::clock::Clock,
+    sysvars::Sysvar,
 };
 use pinocchio_system::instructions::CreateAccount;
 use pinocchio_token::instructions::Transfer;
@@ -117,7 +119,7 @@ pub fn process_swap(
         return Err(ERR_INSUFFICIENT.into());
     }
 
-    let current_ts = 0i64;
+    let current_ts = Clock::get()?.unix_timestamp;
 
     let mut pool_data = pool_state.try_borrow_mut()?;
 
