@@ -40,17 +40,13 @@ pub fn process_init(
         return Err(ERR_INVALID_ACCOUNT.into());
     }
 
-    let space = CircuitBreaker::LEN as u64;
-    let lamports = 1_000_000;
-
-    CreateAccount {
-        from: &*authority,
-        to: &*cb_pda,
-        lamports,
-        space,
-        owner: program_id,
-    }
-    .invoke()?;
+    CreateAccount::with_minimum_balance(
+        &*authority,
+        &*cb_pda,
+        CircuitBreaker::LEN as u64,
+        program_id,
+        None,
+    )?.invoke()?;
 
     let mut cb_data = cb_pda.try_borrow_mut()?;
 

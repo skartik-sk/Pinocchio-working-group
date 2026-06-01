@@ -42,14 +42,13 @@ pub fn process_init(
         return Err(pinocchio::error::ProgramError::InvalidAccountData);
     }
 
-    CreateAccount {
-        from: &*authority,
-        to: &*pool_state,
-        lamports: 1_000_000,
-        space: PoolState::LEN as u64,
-        owner: program_id,
-    }
-    .invoke()?;
+    CreateAccount::with_minimum_balance(
+        &*authority,
+        &*pool_state,
+        PoolState::LEN as u64,
+        program_id,
+        None,
+    )?.invoke()?;
 
     let mut data = pool_state.try_borrow_mut()?;
 
@@ -176,7 +175,11 @@ fn compute_swap(amount_in: u64, reserve_in: u64, reserve_out: u64, amp: u64, fee
         (reserve_out as u128 * d).saturating_div(new_in)
     };
 
-    Some(reserve_out.saturating_sub(new_out as u64))
+    let result = reserve_out.saturating_sub(new_out as u64);
+    if result == 0 || new_out as u64 >= reserve_out {
+        return None;
+    }
+    Some(result)
 }
 
 fn check_cb(data: &mut [u8], amount: u64, ts: i64) -> Result<bool, pinocchio::error::ProgramError> {

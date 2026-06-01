@@ -2,8 +2,6 @@ use pinocchio::{
     AccountView,
     Address,
     ProgramResult,
-    cpi::Signer,
-    instruction::cpi::Seed,
 };
 use pinocchio_system::instructions::CreateAccount;
 use pinocchio_token::instructions::Transfer;
@@ -33,10 +31,6 @@ pub fn process(
     let amount = read_u64(ix_data, 1)?;
     let expiry = read_i64(ix_data, 9).unwrap_or(i64::MAX);
 
-    let _escrow_seeds = [
-        Seed::from(b"escrow"),
-        Seed::from(maker.address().as_ref()),
-    ];
     let (escrow_key, bump) = Address::find_program_address(
         &[b"escrow", maker.address().as_ref()],
         program_id,
@@ -67,16 +61,14 @@ pub fn process(
     drop(cb_data);
 
     let space = Escrow::LEN as u64;
-    let lamports = 1_000_000;
 
-    CreateAccount {
-        from: &*maker,
-        to: &*escrow,
-        lamports,
+    CreateAccount::with_minimum_balance(
+        &*maker,
+        &*escrow,
         space,
-        owner: program_id,
-    }
-    .invoke()?;
+        program_id,
+        None,
+    )?.invoke()?;
 
     let mut escrow_data = escrow.try_borrow_mut()?;
 
@@ -92,16 +84,8 @@ pub fn process(
 
     drop(escrow_data);
 
-    let bump_seed = [bump];
-    let signer_seeds = [
-        Seed::from(b"escrow"),
-        Seed::from(maker.address().as_ref()),
-        Seed::from(&bump_seed[..]),
-    ];
-    let signer = Signer::from(&signer_seeds);
-
     Transfer::new(&*maker_ata_a, &*vault, &*maker, amount)
-        .invoke_signed(&[signer])?;
+        .invoke()?;
 
     log("Escrow created");
 

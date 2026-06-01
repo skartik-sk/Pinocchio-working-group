@@ -55,7 +55,9 @@ pub fn process(
         .invoke_signed(&[signer])?;
 
     let escrow_lamports = escrow.lamports();
-    maker.set_lamports(maker.lamports() + escrow_lamports);
+    let new_maker_lamports = maker.lamports().checked_add(escrow_lamports)
+        .ok_or(pinocchio::error::ProgramError::ArithmeticOverflow)?;
+    maker.set_lamports(new_maker_lamports);
     escrow.set_lamports(0);
 
     log("Escrow refunded");
