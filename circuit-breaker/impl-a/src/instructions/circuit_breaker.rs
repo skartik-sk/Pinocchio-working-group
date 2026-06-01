@@ -31,10 +31,11 @@ pub fn process_init(
     let threshold_type = ix_data.get(9).copied().unwrap_or(1);
     let threshold = read_u64_cb(ix_data, 10).unwrap_or(1_000_000);
 
-    let (cb_key, bump) = Address::find_program_address(
-        &[b"circuit-breaker", authority.address().as_ref()],
+    let cb_seeds: &[&[u8]; 2] = &[b"circuit-breaker", authority.address().as_ref()];
+    let (cb_key, bump) = Address::derive_program_address(
+        cb_seeds,
         program_id,
-    );
+    ).ok_or(pinocchio::error::ProgramError::InvalidSeeds)?;
 
     if cb_pda.address() != &cb_key {
         return Err(ERR_INVALID_ACCOUNT.into());

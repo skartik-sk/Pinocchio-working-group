@@ -33,10 +33,11 @@ pub fn process_init(
 
     let amp = read_u64(ix_data, 1).unwrap_or(100);
 
-    let (pool_key, bump) = Address::find_program_address(
-        &[b"stable-swap-pool", mint_a.address().as_ref(), mint_b.address().as_ref()],
+    let pool_seeds: &[&[u8]; 3] = &[b"stable-swap-pool", mint_a.address().as_ref(), mint_b.address().as_ref()];
+    let (pool_key, bump) = Address::derive_program_address(
+        pool_seeds,
         program_id,
-    );
+    ).ok_or(pinocchio::error::ProgramError::InvalidSeeds)?;
 
     if pool_state.address() != &pool_key {
         return Err(pinocchio::error::ProgramError::InvalidAccountData);

@@ -31,19 +31,21 @@ pub fn process(
     let amount = read_u64(ix_data, 1)?;
     let expiry = read_i64(ix_data, 9).unwrap_or(i64::MAX);
 
-    let (escrow_key, bump) = Address::find_program_address(
-        &[b"escrow", maker.address().as_ref()],
+    let escrow_seeds: &[&[u8]; 2] = &[b"escrow", maker.address().as_ref()];
+    let (escrow_key, bump) = Address::derive_program_address(
+        escrow_seeds,
         program_id,
-    );
+    ).ok_or(pinocchio::error::ProgramError::InvalidSeeds)?;
 
     if escrow.address() != &escrow_key {
         return Err(ERR_INVALID_ACCOUNT.into());
     }
 
-    let (cb_key, _cb_bump) = Address::find_program_address(
-        &[b"circuit-breaker", maker.address().as_ref()],
+    let cb_seeds: &[&[u8]; 2] = &[b"circuit-breaker", maker.address().as_ref()];
+    let (cb_key, _cb_bump) = Address::derive_program_address(
+        cb_seeds,
         program_id,
-    );
+    ).ok_or(pinocchio::error::ProgramError::InvalidSeeds)?;
 
     if cb_pda.address() != &cb_key {
         return Err(ERR_INVALID_ACCOUNT.into());
