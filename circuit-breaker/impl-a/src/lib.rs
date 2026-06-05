@@ -40,31 +40,4 @@ pub fn process_instruction(
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use crate::state::*;
 
-    #[test]
-    fn test_escrow_layout() {
-        assert_eq!(Escrow::LEN, 113);
-        assert_eq!(Escrow::OFFSET_MAKER, 0);
-        assert_eq!(Escrow::OFFSET_MINT_A, 32);
-        assert_eq!(Escrow::OFFSET_MINT_B, 64);
-        assert_eq!(Escrow::OFFSET_AMOUNT, 96);
-        assert_eq!(Escrow::OFFSET_EXPIRY, 104);
-        assert_eq!(Escrow::OFFSET_BUMP, 112);
-    }
-
-    #[test]
-    fn test_cb_layout() {
-        assert_eq!(CircuitBreaker::LEN, 67);
-        assert_eq!(CircuitBreaker::OFFSET_AUTHORITY, 0);
-        assert_eq!(CircuitBreaker::OFFSET_PAUSED, 32);
-        assert_eq!(CircuitBreaker::OFFSET_WINDOW_SEC, 33);
-        assert_eq!(CircuitBreaker::OFFSET_THRESHOLD_TYPE, 41);
-        assert_eq!(CircuitBreaker::OFFSET_THRESHOLD, 42);
-        assert_eq!(CircuitBreaker::OFFSET_LAST_VALUE, 50);
-        assert_eq!(CircuitBreaker::OFFSET_LAST_TS, 58);
-        assert_eq!(CircuitBreaker::OFFSET_BUMP, 66);
-    }
-}

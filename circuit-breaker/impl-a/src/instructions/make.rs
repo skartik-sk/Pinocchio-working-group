@@ -2,6 +2,8 @@ use pinocchio::{
     AccountView,
     Address,
     ProgramResult,
+    cpi::Signer,
+    instruction::cpi::Seed,
 };
 use pinocchio_system::instructions::CreateAccount;
 use pinocchio_token::instructions::Transfer;
@@ -70,7 +72,11 @@ pub fn process(
         space,
         program_id,
         None,
-    )?.invoke()?;
+    )?.invoke_signed(&[Signer::from(&[
+        Seed::from(b"escrow"),
+        Seed::from(maker.address().as_ref()),
+        Seed::from(&[bump]),
+    ])])?;
 
     let mut escrow_data = escrow.try_borrow_mut()?;
 

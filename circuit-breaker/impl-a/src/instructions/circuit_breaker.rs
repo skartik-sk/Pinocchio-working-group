@@ -2,6 +2,8 @@ use pinocchio::{
     AccountView,
     Address,
     ProgramResult,
+    cpi::Signer,
+    instruction::cpi::Seed,
 };
 use pinocchio_system::instructions::CreateAccount;
 use solana_program_log::log;
@@ -47,7 +49,11 @@ pub fn process_init(
         CircuitBreaker::LEN as u64,
         program_id,
         None,
-    )?.invoke()?;
+    )?.invoke_signed(&[Signer::from(&[
+        Seed::from(b"circuit-breaker"),
+        Seed::from(authority.address().as_ref()),
+        Seed::from(&[bump]),
+    ])])?;
 
     let mut cb_data = cb_pda.try_borrow_mut()?;
 
@@ -95,7 +101,7 @@ pub fn process_update(
     if ix_data.len() >= 10 {
         cb_data[CircuitBreaker::OFFSET_THRESHOLD_TYPE] = ix_data[9];
     }
-    if ix_data.len() >= 19 {
+    if ix_data.len() >= 18 {
         write_u64_cb(&mut cb_data, CircuitBreaker::OFFSET_THRESHOLD, read_u64_cb(ix_data, 10)?);
     }
 

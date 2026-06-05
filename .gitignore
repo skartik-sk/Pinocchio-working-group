@@ -5,11 +5,11 @@
 Cargo.lock
 
 # Solana
-*.so
+.claude/
 *.rbf
 .anchor/
 program-id/
-
+target/
 # IDE
 .idea/
 .vscode/

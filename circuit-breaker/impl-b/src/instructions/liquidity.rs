@@ -50,7 +50,8 @@ pub fn process_add(
     drop(lp_mint_data);
 
     let lp_to_mint = if lp_supply == 0 {
-        let product = (reserve_a_amt as u128).saturating_mul(reserve_b_amt as u128);
+        // First liquidity: reserves are empty, use input amounts
+        let product = (amount_a as u128).saturating_mul(amount_b as u128);
         approx_sqrt(product).saturating_mul(1_000_000)
     } else {
         let ratio_a = (amount_a as u128 * 1_000_000)

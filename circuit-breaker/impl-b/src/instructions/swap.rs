@@ -49,7 +49,12 @@ pub fn process_init(
         PoolState::LEN as u64,
         program_id,
         None,
-    )?.invoke()?;
+    )?.invoke_signed(&[Signer::from(&[
+        Seed::from(b"stable-swap-pool"),
+        Seed::from(mint_a.address().as_ref()),
+        Seed::from(mint_b.address().as_ref()),
+        Seed::from(&[bump]),
+    ])])?;
 
     let mut data = pool_state.try_borrow_mut()?;
 
@@ -156,31 +161,26 @@ pub fn process_swap(
     Ok(())
 }
 
-fn compute_swap(amount_in: u64, reserve_in: u64, reserve_out: u64, amp: u64, fee_bps: u16) -> Option<u64> {
+fn compute_swap(amount_in: u64, reserve_in: u64, reserve_out: u64, _amp: u64, fee_bps: u16) -> Option<u64> {
+    if reserve_in == 0 || reserve_out == 0 {
+        return None;
+    }
+
     let fee = (amount_in as u128)
         .saturating_mul(fee_bps as u128)
         .saturating_div(10000) as u64;
     let amount_with_fee = amount_in.saturating_sub(fee);
 
-    let d = (reserve_in as u128)
-        .saturating_mul(reserve_out as u128)
-        .saturating_mul(amp as u128 * 4);
+    // Constant product: x * y = k
+    let numerator = (reserve_out as u128).saturating_mul(amount_with_fee as u128);
+    let denominator = (reserve_in as u128).saturating_add(amount_with_fee as u128);
 
-    let new_in = (reserve_in as u128).saturating_add(amount_with_fee as u128);
+    let amount_out = numerator.saturating_div(denominator);
 
-    let new_out = if amp >= 1000 {
-        let x = amp as u128 * 4 + d;
-        let y = amp as u128 * 4 + 1;
-        (x * reserve_out as u128).saturating_div(y)
-    } else {
-        (reserve_out as u128 * d).saturating_div(new_in)
-    };
-
-    let result = reserve_out.saturating_sub(new_out as u64);
-    if result == 0 || new_out as u64 >= reserve_out {
+    if amount_out == 0 || amount_out >= reserve_out as u128 {
         return None;
     }
-    Some(result)
+    Some(amount_out as u64)
 }
 
 fn check_cb(data: &mut [u8], amount: u64, ts: i64) -> Result<bool, pinocchio::error::ProgramError> {
